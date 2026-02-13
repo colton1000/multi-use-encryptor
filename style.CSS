@@ -1,0 +1,50 @@
+body {
+    font-family: Arial, sans-serif;
+    background: #111;
+    color: #eee;
+    text-align: center;
+    padding: 40px;
+}
+
+#dropzone {
+    border: 3px dashed #888;
+    padding: 60px;
+    margin: 30px auto;
+    width: 60%;
+    background: #222;
+    border-radius: 10px;
+    transition: 0.3s;
+}
+
+#dropzone.dragover {
+    border-color: #4af;
+    background: #1a1a1a;
+}
+
+#options {
+    margin-top: 20px;
+}
+
+input, select {
+    padding: 8px;
+    margin: 10px;
+    border-radius: 6px;
+    border: none;
+}
+
+#mode-switch button {
+    padding: 10px 20px;
+    margin: 5px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+#mode-switch .active {
+    background: #4af;
+    color: #000;
+}
+
+#output {
+    margin-top: 30px;
+}

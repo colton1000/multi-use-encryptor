@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>File Encryptor</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>Drag‑and‑Drop File Encryptor</h1>
+
+<div id="mode-switch">
+    <button id="encryptMode" class="active">Encrypt</button>
+    <button id="decryptMode">Decrypt</button>
+</div>
+
+<div id="dropzone">Drop a file here</div>
+
+<div id="options">
+<label>Encryption Type:</label>
+<select id="algoSelect">
+    <!-- Full-file modes -->
+    <option value="full-aes-gcm">Full file – AES‑GCM</option>
+    <option value="full-aes-cbc">Full file – AES‑CBC</option>
+    <option value="full-aes-ctr">Full file – AES‑CTR</option>
+    <option value="full-xor">Full file – XOR stream</option>
+
+    <!-- Usable file modes -->
+    <option value="selective-text">Selective text encryption</option>
+    <option value="embedded-block">Embedded encrypted block</option>
+
+    <!-- Stego modes -->
+    <option value="stego-png-meta">PNG stego – metadata</option>
+    <option value="stego-png-lsb">PNG stego – LSB pixels</option>
+</select>
+    <label>Password:</label>
+    <input type="password" id="password" placeholder="Enter password">
+</div>
+
+<div id="output"></div>
+
+<script src="encryptor-V2.js"></script>
+</body>
+</html>
