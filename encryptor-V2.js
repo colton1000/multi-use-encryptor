@@ -1,3 +1,48 @@
+/* ===================== Constants ===================== */
+
+const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500MB limit
+const MIN_PASSWORD_LENGTH = 4;
+const ENC1_MAGIC = [69, 78, 67, 49]; // 'E','N','C','1'
+const ENC1_MAGIC_STR = "ENC1";
+const PBKDF2_ITERATIONS = 200000;
+const PBKDF2_HASH = "SHA-256";
+
+// Markers and patterns
+const MARKERS = {
+    ENC_BLOCK: "ENC_BLOCK:",
+    ENCVAL: "ENCVAL:",
+    EMBEDDED_START: "-----BEGIN ENCRYPTED BLOCK-----",
+    EMBEDDED_END: "-----END ENCRYPTED BLOCK-----",
+    PNG_STEGO: "PNG_STEGO_META:",
+    LSB_STEGO: "LSBSTEGO1"
+};
+
+const REGEX_PATTERNS = {
+    TEXT_NODES: /(>)([^<>]+?)(<)/g,
+    NEWLINES: /\r?\n/
+};
+
+const MIME_TYPES = {
+    TEXT: "text/plain",
+    JSON: "application/json",
+    XML: "application/xml",
+    CSV: "text/csv",
+    HTML: "text/html",
+    PNG: "image/png",
+    BINARY: "application/octet-stream"
+};
+
+const FILE_EXTENSIONS = {
+    TXT: "txt",
+    JSON: "json",
+    CSV: "csv",
+    XML: "xml",
+    HTML: "html",
+    HTM: "htm",
+    PNG: "png",
+    ENC: "enc"
+};
+
 const dropzone = document.getElementById("dropzone");
 const algoSelect = document.getElementById("algoSelect");
 const passwordInput = document.getElementById("password");
@@ -13,6 +58,34 @@ function switchMode(m) {
     document.getElementById("encryptMode").classList.toggle("active", m === "encrypt");
     document.getElementById("decryptMode").classList.toggle("active", m === "decrypt");
     output.textContent = "";
+}
+
+/* ===================== Input Validation & Helpers ===================== */
+
+function validateInput(password, arrayBuffer) {
+    if (!password || password.length < MIN_PASSWORD_LENGTH) {
+        throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+    }
+    if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+        throw new Error("File is empty.");
+    }
+    if (arrayBuffer.byteLength > MAX_FILE_SIZE) {
+        const sizeMB = (arrayBuffer.byteLength / (1024 * 1024)).toFixed(2);
+        throw new Error(`File too large (${sizeMB}MB). Maximum: ${MAX_FILE_SIZE / (1024 * 1024)}MB.`);
+    }
+}
+
+function transformFilename(name, pattern) {
+    if (!name || typeof name !== "string") return "encrypted_file";
+    return name.replace(/(\.[^.]*)?$/, pattern);
+}
+
+function safeBase64ToBuffer(b64Str) {
+    try {
+        return Uint8Array.from(atob(b64Str), c => c.charCodeAt(0)).buffer;
+    } catch (err) {
+        throw new Error("Invalid base64 data: " + err.message);
+    }
 }
 
 dropzone.addEventListener("dragover", e => {
@@ -41,6 +114,8 @@ dropzone.addEventListener("drop", async e => {
     const algo = algoSelect.value;
 
     try {
+        validateInput(password, arrayBuffer);
+
         if (mode === "encrypt") {
             const result = await encryptDispatcher(algo, file, arrayBuffer, password);
             if (result) {
@@ -84,8 +159,8 @@ async function deriveKey(password, salt, algoName) {
         {
             name: "PBKDF2",
             salt,
-            iterations: 200000,
-            hash: "SHA-256"
+            iterations: PBKDF2_ITERATIONS,
+            hash: PBKDF2_HASH
         },
         keyMaterial,
         { name: algoName, length: 256 },
@@ -102,7 +177,7 @@ async function deriveKey(password, salt, algoName) {
 // [ivLen bytes iv]
 // [ciphertext...]
 function buildHeader(modeId, salt, iv, ciphertext) {
-    const magic = new Uint8Array([69, 78, 67, 49]); // 'E','N','C','1'
+    const magic = new Uint8Array(ENC1_MAGIC);
     const ivLen = iv ? iv.length : 0;
     const header = new Uint8Array(4 + 1 + 16 + 1 + ivLen + ciphertext.byteLength);
     let offset = 0;
@@ -121,7 +196,9 @@ function buildHeader(modeId, salt, iv, ciphertext) {
 function parseHeader(buffer) {
     const bytes = new Uint8Array(buffer);
     if (bytes.length < 4 + 1 + 16 + 1) throw new Error("Invalid header");
-    if (bytes[0] !== 69 || bytes[1] !== 78 || bytes[2] !== 67 || bytes[3] !== 49) {
+    const expectedMagic = ENC1_MAGIC;
+    if (bytes[0] !== expectedMagic[0] || bytes[1] !== expectedMagic[1] || 
+        bytes[2] !== expectedMagic[2] || bytes[3] !== expectedMagic[3]) {
         throw new Error("Not an ENC1 payload");
     }
     let offset = 4;
@@ -135,6 +212,7 @@ function parseHeader(buffer) {
 }
 
 function getFileExtension(name) {
+    if (!name || typeof name !== "string") return "";
     const idx = name.lastIndexOf(".");
     return idx === -1 ? "" : name.slice(idx + 1).toLowerCase();
 }
@@ -225,25 +303,23 @@ async function encryptSelectiveText(filename, data, password) {
     const ext = getFileExtension(filename);
     const text = dec.decode(new Uint8Array(data));
 
-    // ===== TXT (same as before) =====
-    if (ext === "txt" || ext === "") {
-        const lines = text.split(/\r?\n/);
+    // ===== TXT =====
+    if (ext === FILE_EXTENSIONS.TXT || ext === "") {
+        const lines = text.split(REGEX_PATTERNS.NEWLINES);
         const first = lines.shift() ?? "";
         const rest = lines.join("\n");
         const encBuf = await encryptFullAESGCM(enc.encode(rest), password);
         const b64 = btoa(String.fromCharCode(...new Uint8Array(encBuf)));
-        const outText = first + "\n" + "ENC_BLOCK:" + b64;
-        return new Blob([outText], { type: "text/plain" });
+        const outText = first + "\n" + MARKERS.ENC_BLOCK + b64;
+        return new Blob([outText], { type: MIME_TYPES.TEXT });
     }
 
-    // ===== JSON (same as before) =====
-    if (ext === "json") {
+    // ===== JSON =====
+    if (ext === FILE_EXTENSIONS.JSON) {
         let obj;
-        try {
-            obj = JSON.parse(text);
-        } catch {
-            throw new Error("Invalid JSON for selective mode");
-        }
+        try { obj = JSON.parse(text); }
+        catch { throw new Error("Invalid JSON for selective mode"); }
+
         async function encryptValue(v) {
             if (v === null) return v;
             if (typeof v === "object") {
@@ -253,110 +329,142 @@ async function encryptSelectiveText(filename, data, password) {
                     return arr;
                 } else {
                     const o = {};
-                    for (const k of Object.keys(v)) {
-                        o[k] = await encryptValue(v[k]);
-                    }
+                    for (const k of Object.keys(v)) o[k] = await encryptValue(v[k]);
                     return o;
                 }
             } else {
                 const buf = await encryptFullAESGCM(enc.encode(String(v)), password);
                 const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-                return "ENCVAL:" + b64;
+                return MARKERS.ENCVAL + b64;
             }
         }
+
         const encObj = await encryptValue(obj);
-        const outText = JSON.stringify(encObj, null, 2);
-        return new Blob([outText], { type: "application/json" });
+        return new Blob([JSON.stringify(encObj, null, 2)], { type: MIME_TYPES.JSON });
     }
 
     // ===== CSV =====
-    if (ext === "csv") {
-        const lines = text.split(/\r?\n/);
+    if (ext === FILE_EXTENSIONS.CSV) {
+        const lines = text.split(REGEX_PATTERNS.NEWLINES);
         const outLines = [];
+
         for (const line of lines) {
-            if (!line.trim()) {
-                outLines.push(line);
-                continue;
-            }
+            if (!line.trim()) { outLines.push(line); continue; }
             const cells = line.split(",");
             const encCells = [];
+
             for (const cell of cells) {
                 const buf = await encryptFullAESGCM(enc.encode(cell), password);
                 const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-                encCells.push("ENCVAL:" + b64);
+                encCells.push(MARKERS.ENCVAL + b64);
             }
+
             outLines.push(encCells.join(","));
         }
-        const outText = outLines.join("\n");
-        return new Blob([outText], { type: "text/csv" });
+
+        return new Blob([outLines.join("\n")], { type: MIME_TYPES.CSV });
     }
 
-    // ===== XML & HTML (priority) =====
-    if (ext === "xml" || ext === "html" || ext === "htm") {
-        // Very simple text-node encryption:
-        // anything between > and < that is not just whitespace
-        const regex = /(>)([^<>]+?)(<)/g;
-        let match;
-        let lastIndex = 0;
-        let result = "";
+    // ===== XML =====
+    if (ext === FILE_EXTENSIONS.XML) {
+        const regex = REGEX_PATTERNS.TEXT_NODES;
+        let match, lastIndex = 0, result = "";
 
         while ((match = regex.exec(text)) !== null) {
             const [full, open, content, close] = match;
-            result += text.slice(lastIndex, match.index); // stuff before this match
+            result += text.slice(lastIndex, match.index);
 
             const trimmed = content.trim();
             if (!trimmed) {
-                // keep as-is
                 result += full;
             } else {
                 const buf = await encryptFullAESGCM(enc.encode(content), password);
                 const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-                const encText = "ENCVAL:" + b64;
-                result += open + encText + close;
+                result += open + MARKERS.ENCVAL + b64 + close;
             }
 
             lastIndex = regex.lastIndex;
         }
-        result += text.slice(lastIndex);
 
-        const mime = ext === "xml" ? "application/xml" : "text/html";
-        return new Blob([result], { type: mime });
+        result += text.slice(lastIndex);
+        return new Blob([result], { type: MIME_TYPES.XML });
     }
 
-    throw new Error("Selective text mode currently supports .txt, .json, .csv, .xml, .html");
-}
+    // ===== HTML (encrypt ONLY inside <body>) =====
+    if (ext === FILE_EXTENSIONS.HTML || ext === FILE_EXTENSIONS.HTM) {
+        const bodyStart = text.toLowerCase().indexOf("<body");
+        const bodyEnd = text.toLowerCase().indexOf("</body>");
 
+        if (bodyStart === -1 || bodyEnd === -1) {
+            throw new Error("HTML missing <body> tag");
+        }
+
+        // Extract <body ...> tag
+        const openTagEnd = text.indexOf(">", bodyStart) + 1;
+        const beforeBody = text.slice(0, openTagEnd);
+        const bodyContent = text.slice(openTagEnd, bodyEnd);
+        const afterBody = text.slice(bodyEnd);
+
+        // Encrypt only text nodes inside body
+        const regex = REGEX_PATTERNS.TEXT_NODES;
+        let match, lastIndex = 0, newBody = "";
+
+        while ((match = regex.exec(bodyContent)) !== null) {
+            const [full, open, content, close] = match;
+            newBody += bodyContent.slice(lastIndex, match.index);
+
+            const trimmed = content.trim();
+            if (!trimmed) {
+                newBody += full;
+            } else {
+                const buf = await encryptFullAESGCM(enc.encode(content), password);
+                const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+                newBody += open + MARKERS.ENCVAL + b64 + close;
+            }
+
+            lastIndex = regex.lastIndex;
+        }
+
+        newBody += bodyContent.slice(lastIndex);
+
+        const finalHTML = beforeBody + newBody + afterBody;
+        return new Blob([finalHTML], { type: MIME_TYPES.HTML });
+    }
+
+    throw new Error("Selective mode supports .txt, .json, .csv, .xml, .html");
+}
 async function decryptSelectiveText(filename, data, password) {
     const ext = getFileExtension(filename);
     const text = dec.decode(new Uint8Array(data));
 
-    // ===== TXT (same as before) =====
-    if (ext === "txt" || ext === "") {
-        const lines = text.split(/\r?\n/);
-        if (lines.length === 0) return new Blob([text], { type: "text/plain" });
+    // ===== TXT =====
+    if (ext === FILE_EXTENSIONS.TXT || ext === "") {
+        const lines = text.split(REGEX_PATTERNS.NEWLINES);
+        if (lines.length === 0) return new Blob([text], { type: MIME_TYPES.TEXT });
+
         const first = lines.shift();
         const rest = lines.join("\n");
-        if (!rest.startsWith("ENC_BLOCK:")) {
-            return new Blob([text], { type: "text/plain" });
+
+        if (!rest.startsWith(MARKERS.ENC_BLOCK)) {
+            return new Blob([text], { type: MIME_TYPES.TEXT });
         }
-        const b64 = rest.slice("ENC_BLOCK:".length);
-        const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer;
+
+        const b64 = rest.slice(MARKERS.ENC_BLOCK.length);
+        const raw = safeBase64ToBuffer(b64);
         const { salt, iv, ciphertext, modeId } = parseHeader(raw);
-        if (modeId !== MODE_FULL_AES_GCM) throw new Error("Unexpected mode in selective txt");
+
         const plainBuf = await decryptFullAESGCM(ciphertext, password, salt, iv);
         const plainRest = dec.decode(new Uint8Array(plainBuf));
-        const outText = first + "\n" + plainRest;
-        return new Blob([outText], { type: "text/plain" });
+
+        return new Blob([first + "\n" + plainRest], { type: MIME_TYPES.TEXT });
     }
 
-    // ===== JSON (same as before) =====
-    if (ext === "json") {
+    // ===== JSON =====
+    if (ext === FILE_EXTENSIONS.JSON) {
         let obj;
-        try {
-            obj = JSON.parse(text);
-        } catch {
-            throw new Error("Invalid JSON for selective mode");
-        }
+        try { obj = JSON.parse(text); }
+        catch { throw new Error("Invalid JSON for selective mode"); }
+
         async function decryptValue(v) {
             if (v === null) return v;
             if (typeof v === "object") {
@@ -366,94 +474,124 @@ async function decryptSelectiveText(filename, data, password) {
                     return arr;
                 } else {
                     const o = {};
-                    for (const k of Object.keys(v)) {
-                        o[k] = await decryptValue(v[k]);
-                    }
+                    for (const k of Object.keys(v)) o[k] = await decryptValue(v[k]);
                     return o;
                 }
-            } else if (typeof v === "string" && v.startsWith("ENCVAL:")) {
-                const b64 = v.slice("ENCVAL:".length);
-                const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer;
-                const { salt, iv, ciphertext, modeId } = parseHeader(raw);
-                if (modeId !== MODE_FULL_AES_GCM) throw new Error("Unexpected mode in selective json");
+            } else if (typeof v === "string" && v.startsWith(MARKERS.ENCVAL)) {
+                const b64 = v.slice(MARKERS.ENCVAL.length);
+                const raw = safeBase64ToBuffer(b64);
+                const { salt, iv, ciphertext } = parseHeader(raw);
                 const plainBuf = await decryptFullAESGCM(ciphertext, password, salt, iv);
-                const plainStr = dec.decode(new Uint8Array(plainBuf));
-                return plainStr;
+                return dec.decode(new Uint8Array(plainBuf));
             } else {
                 return v;
             }
         }
+
         const decObj = await decryptValue(obj);
-        const outText = JSON.stringify(decObj, null, 2);
-        return new Blob([outText], { type: "application/json" });
+        return new Blob([JSON.stringify(decObj, null, 2)], { type: MIME_TYPES.JSON });
     }
 
     // ===== CSV =====
-    if (ext === "csv") {
-        const lines = text.split(/\r?\n/);
+    if (ext === FILE_EXTENSIONS.CSV) {
+        const lines = text.split(REGEX_PATTERNS.NEWLINES);
         const outLines = [];
+
         for (const line of lines) {
-            if (!line.trim()) {
-                outLines.push(line);
-                continue;
-            }
+            if (!line.trim()) { outLines.push(line); continue; }
+
             const cells = line.split(",");
             const decCells = [];
+
             for (const cell of cells) {
                 const trimmed = cell.trim();
-                if (!trimmed.startsWith("ENCVAL:")) {
+                if (!trimmed.startsWith(MARKERS.ENCVAL)) {
                     decCells.push(cell);
                     continue;
                 }
-                const b64 = trimmed.slice("ENCVAL:".length);
-                const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer;
-                const { salt, iv, ciphertext, modeId } = parseHeader(raw);
-                if (modeId !== MODE_FULL_AES_GCM) throw new Error("Unexpected mode in selective csv");
+
+                const b64 = trimmed.slice(MARKERS.ENCVAL.length);
+                const raw = safeBase64ToBuffer(b64);
+                const { salt, iv, ciphertext } = parseHeader(raw);
                 const plainBuf = await decryptFullAESGCM(ciphertext, password, salt, iv);
-                const plainStr = dec.decode(new Uint8Array(plainBuf));
-                decCells.push(plainStr);
+                decCells.push(dec.decode(new Uint8Array(plainBuf)));
             }
+
             outLines.push(decCells.join(","));
         }
-        const outText = outLines.join("\n");
-        return new Blob([outText], { type: "text/csv" });
+
+        return new Blob([outLines.join("\n")], { type: MIME_TYPES.CSV });
     }
 
-    // ===== XML & HTML =====
-    if (ext === "xml" || ext === "html" || ext === "htm") {
-        const regex = /(>)([^<>]+?)(<)/g;
-        let match;
-        let lastIndex = 0;
-        let result = "";
+    // ===== XML =====
+    if (ext === FILE_EXTENSIONS.XML) {
+        const regex = REGEX_PATTERNS.TEXT_NODES;
+        let match, lastIndex = 0, result = "";
 
         while ((match = regex.exec(text)) !== null) {
             const [full, open, content, close] = match;
             result += text.slice(lastIndex, match.index);
 
             const trimmed = content.trim();
-            if (trimmed.startsWith("ENCVAL:")) {
-                const b64 = trimmed.slice("ENCVAL:".length);
-                const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer;
-                const { salt, iv, ciphertext, modeId } = parseHeader(raw);
-                if (modeId !== MODE_FULL_AES_GCM) throw new Error("Unexpected mode in selective html/xml");
+            if (trimmed.startsWith(MARKERS.ENCVAL)) {
+                const b64 = trimmed.slice(MARKERS.ENCVAL.length);
+                const raw = safeBase64ToBuffer(b64);
+                const { salt, iv, ciphertext } = parseHeader(raw);
                 const plainBuf = await decryptFullAESGCM(ciphertext, password, salt, iv);
-                const plainStr = dec.decode(new Uint8Array(plainBuf));
-                result += open + plainStr + close;
+                result += open + dec.decode(new Uint8Array(plainBuf)) + close;
             } else {
                 result += full;
             }
 
             lastIndex = regex.lastIndex;
         }
-        result += text.slice(lastIndex);
 
-        const mime = ext === "xml" ? "application/xml" : "text/html";
-        return new Blob([result], { type: mime });
+        result += text.slice(lastIndex);
+        return new Blob([result], { type: MIME_TYPES.XML });
     }
 
-    throw new Error("Selective text mode currently supports .txt, .json, .csv, .xml, .html");
-}
+    // ===== HTML (decrypt ONLY inside <body>) =====
+    if (ext === FILE_EXTENSIONS.HTML || ext === FILE_EXTENSIONS.HTM) {
+        const bodyStart = text.toLowerCase().indexOf("<body");
+        const bodyEnd = text.toLowerCase().indexOf("</body>");
 
+        if (bodyStart === -1 || bodyEnd === -1) {
+            throw new Error("HTML missing <body> tag");
+        }
+
+        const openTagEnd = text.indexOf(">", bodyStart) + 1;
+        const beforeBody = text.slice(0, openTagEnd);
+        const bodyContent = text.slice(openTagEnd, bodyEnd);
+        const afterBody = text.slice(bodyEnd);
+
+        const regex = REGEX_PATTERNS.TEXT_NODES;
+        let match, lastIndex = 0, newBody = "";
+
+        while ((match = regex.exec(bodyContent)) !== null) {
+            const [full, open, content, close] = match;
+            newBody += bodyContent.slice(lastIndex, match.index);
+
+            const trimmed = content.trim();
+            if (trimmed.startsWith(MARKERS.ENCVAL)) {
+                const b64 = trimmed.slice(MARKERS.ENCVAL.length);
+                const raw = safeBase64ToBuffer(b64);
+                const { salt, iv, ciphertext } = parseHeader(raw);
+                const plainBuf = await decryptFullAESGCM(ciphertext, password, salt, iv);
+                newBody += open + dec.decode(new Uint8Array(plainBuf)) + close;
+            } else {
+                newBody += full;
+            }
+
+            lastIndex = regex.lastIndex;
+        }
+
+        newBody += bodyContent.slice(lastIndex);
+
+        return new Blob([beforeBody + newBody + afterBody], { type: MIME_TYPES.HTML });
+    }
+
+    throw new Error("Selective mode supports .txt, .json, .csv, .xml, .html");
+}
 /* ===================== Embedded encrypted block ===================== */
 
 async function encryptEmbeddedBlock(filename, data, password) {
@@ -464,8 +602,8 @@ async function encryptEmbeddedBlock(filename, data, password) {
     const headerBuf = buildHeader(MODE_FULL_AES_GCM, salt, iv, ciphertext);
     const b64 = btoa(String.fromCharCode(...new Uint8Array(headerBuf)));
 
-    const markerStart = "\n-----BEGIN ENCRYPTED BLOCK-----\n";
-    const markerEnd = "\n-----END ENCRYPTED BLOCK-----\n";
+    const markerStart = "\n" + MARKERS.EMBEDDED_START + "\n";
+    const markerEnd = "\n" + MARKERS.EMBEDDED_END + "\n";
     const block = markerStart + b64 + markerEnd;
 
     const original = new Uint8Array(data);
@@ -474,13 +612,13 @@ async function encryptEmbeddedBlock(filename, data, password) {
     combined.set(original, 0);
     combined.set(blockBytes, original.length);
 
-    return new Blob([combined], { type: "application/octet-stream" });
+    return new Blob([combined], { type: MIME_TYPES.BINARY });
 }
 
 async function decryptEmbeddedBlock(filename, data, password) {
     const text = dec.decode(new Uint8Array(data));
-    const start = text.indexOf("-----BEGIN ENCRYPTED BLOCK-----");
-    const end = text.indexOf("-----END ENCRYPTED BLOCK-----");
+    const start = text.indexOf(MARKERS.EMBEDDED_START);
+    const end = text.indexOf(MARKERS.EMBEDDED_END);
     if (start === -1 || end === -1) {
         throw new Error("No embedded block found");
     }
@@ -488,18 +626,18 @@ async function decryptEmbeddedBlock(filename, data, password) {
         text.indexOf("\n", start) + 1,
         text.lastIndexOf("\n", end)
     ).trim();
-    const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer;
+    const raw = safeBase64ToBuffer(b64);
     const { salt, iv, ciphertext, modeId } = parseHeader(raw);
     if (modeId !== MODE_FULL_AES_GCM) throw new Error("Unexpected mode in embedded block");
     const plainBuf = await decryptFullAESGCM(ciphertext, password, salt, iv);
-    return new Blob([plainBuf], { type: "application/octet-stream" });
+    return new Blob([plainBuf], { type: MIME_TYPES.BINARY });
 }
 
 /* ===================== PNG stego – metadata (trailing data) ===================== */
 
 async function encryptStegoPngMeta(filename, data, password) {
     const ext = getFileExtension(filename);
-    if (ext !== "png") throw new Error("PNG metadata stego requires a .png file");
+    if (ext !== FILE_EXTENSIONS.PNG) throw new Error("PNG metadata stego requires a .png file");
 
     const salt = crypto.getRandomValues(new Uint8Array(16));
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -508,7 +646,7 @@ async function encryptStegoPngMeta(filename, data, password) {
     const headerBuf = buildHeader(MODE_FULL_AES_GCM, salt, iv, ciphertext);
     const b64 = btoa(String.fromCharCode(...new Uint8Array(headerBuf)));
 
-    const marker = "\nPNG_STEGO_META:";
+    const marker = "\n" + MARKERS.PNG_STEGO;
     const markerBytes = enc.encode(marker + b64);
 
     const original = new Uint8Array(data);
@@ -516,12 +654,12 @@ async function encryptStegoPngMeta(filename, data, password) {
     combined.set(original, 0);
     combined.set(markerBytes, original.length);
 
-    return new Blob([combined], { type: "image/png" });
+    return new Blob([combined], { type: MIME_TYPES.PNG });
 }
 
 async function decryptStegoPngMeta(filename, data, password) {
     const bytes = new Uint8Array(data);
-    const marker = enc.encode("PNG_STEGO_META:");
+    const marker = enc.encode(MARKERS.PNG_STEGO);
     // search from end
     let pos = -1;
     for (let i = bytes.length - marker.length; i >= 0; i--) {
@@ -534,29 +672,53 @@ async function decryptStegoPngMeta(filename, data, password) {
     if (pos === -1) throw new Error("No PNG stego metadata found");
     const b64Bytes = bytes.slice(pos + marker.length);
     const b64 = dec.decode(b64Bytes);
-    const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer;
+    const raw = safeBase64ToBuffer(b64);
     const { salt, iv, ciphertext, modeId } = parseHeader(raw);
     if (modeId !== MODE_FULL_AES_GCM) throw new Error("Unexpected mode in PNG stego meta");
     const plainBuf = await decryptFullAESGCM(ciphertext, password, salt, iv);
-    return new Blob([plainBuf], { type: "application/octet-stream" });
+    return new Blob([plainBuf], { type: MIME_TYPES.BINARY });
 }
 
 /* ===================== PNG stego – LSB pixels (with fallback) ===================== */
 
 function loadImageFromArrayBuffer(buffer) {
     return new Promise((resolve, reject) => {
-        const blob = new Blob([buffer], { type: "image/png" });
-        const url = URL.createObjectURL(blob);
-        const img = new Image();
-        img.onload = () => {
-            URL.revokeObjectURL(url);
-            resolve(img);
-        };
-        img.onerror = e => {
-            URL.revokeObjectURL(url);
-            reject(new Error("Failed to load image"));
-        };
-        img.src = url;
+        try {
+            const blob = new Blob([buffer], { type: MIME_TYPES.PNG });
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            
+            img.onload = () => {
+                try {
+                    URL.revokeObjectURL(url);
+                    resolve(img);
+                } catch (err) {
+                    reject(new Error("Failed to cleanup image URL: " + err.message));
+                }
+            };
+            
+            img.onerror = () => {
+                try {
+                    URL.revokeObjectURL(url);
+                } catch (e) {
+                    /* silently ignore cleanup errors */
+                }
+                reject(new Error("Failed to load image - invalid PNG or corrupted data"));
+            };
+            
+            img.onabort = () => {
+                try {
+                    URL.revokeObjectURL(url);
+                } catch (e) {
+                    /* silently ignore cleanup errors */
+                }
+                reject(new Error("Image loading aborted"));
+            };
+            
+            img.src = url;
+        } catch (err) {
+            reject(new Error("Failed to create image blob: " + err.message));
+        }
     });
 }
 
@@ -585,7 +747,7 @@ function bytesFromBits(bits) {
 
 async function encryptStegoPngLSB(filename, data, password) {
     const ext = getFileExtension(filename);
-    if (ext !== "png") throw new Error("PNG LSB stego requires a .png file");
+    if (ext !== FILE_EXTENSIONS.PNG) throw new Error("PNG LSB stego requires a .png file");
 
     const salt = crypto.getRandomValues(new Uint8Array(16));
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -594,77 +756,91 @@ async function encryptStegoPngLSB(filename, data, password) {
     const headerBuf = buildHeader(MODE_FULL_AES_GCM, salt, iv, ciphertext);
 
     // payload = magic + headerBuf
-    const magic = enc.encode("LSBSTEGO1");
+    const magic = enc.encode(MARKERS.LSB_STEGO);
     const payload = new Uint8Array(magic.length + headerBuf.byteLength);
     payload.set(magic, 0);
     payload.set(new Uint8Array(headerBuf), magic.length);
 
     const bits = bitsFromBytes(payload);
 
-    const img = await loadImageFromArrayBuffer(data);
-    const canvas = document.createElement("canvas");
-    canvas.width = img.width;
-    canvas.height = img.height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const pixels = imageData.data; // RGBA
+    try {
+        const img = await loadImageFromArrayBuffer(data);
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+        
+        if (!ctx) throw new Error("Failed to get 2D canvas context");
+        
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const pixels = imageData.data; // RGBA
 
-    const capacity = Math.floor(pixels.length / 4) * 3; // use R,G,B LSB
-    if (bits.length > capacity) {
-        // overflow -> fallback to metadata stego (your choice B)
-        return encryptStegoPngMeta(filename, data, password);
-    }
-
-    let bitIndex = 0;
-    for (let i = 0; i < pixels.length && bitIndex < bits.length; i += 4) {
-        for (let c = 0; c < 3 && bitIndex < bits.length; c++) {
-            pixels[i + c] = (pixels[i + c] & 0xFE) | bits[bitIndex++];
+        const capacity = Math.floor(pixels.length / 4) * 3; // use R,G,B LSB
+        if (bits.length > capacity) {
+            // overflow -> fallback to metadata stego
+            return encryptStegoPngMeta(filename, data, password);
         }
-    }
-    ctx.putImageData(imageData, 0, 0);
 
-    const stegoBlob = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
-    return stegoBlob;
+        let bitIndex = 0;
+        for (let i = 0; i < pixels.length && bitIndex < bits.length; i += 4) {
+            for (let c = 0; c < 3 && bitIndex < bits.length; c++) {
+                pixels[i + c] = (pixels[i + c] & 0xFE) | bits[bitIndex++];
+            }
+        }
+        ctx.putImageData(imageData, 0, 0);
+
+        const stegoBlob = await new Promise(resolve => canvas.toBlob(resolve, MIME_TYPES.PNG));
+        return stegoBlob;
+    } catch (err) {
+        throw new Error("LSB stego encoding failed: " + err.message);
+    }
 }
 
 async function decryptStegoPngLSB(filename, data, password) {
     const ext = getFileExtension(filename);
-    if (ext !== "png") throw new Error("PNG LSB stego requires a .png file");
+    if (ext !== FILE_EXTENSIONS.PNG) throw new Error("PNG LSB stego requires a .png file");
 
-    const img = await loadImageFromArrayBuffer(data);
-    const canvas = document.createElement("canvas");
-    canvas.width = img.width;
-    canvas.height = img.height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const pixels = imageData.data;
+    try {
+        const img = await loadImageFromArrayBuffer(data);
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+        
+        if (!ctx) throw new Error("Failed to get 2D canvas context");
+        
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const pixels = imageData.data;
 
-    const bits = [];
-    for (let i = 0; i < pixels.length; i += 4) {
-        for (let c = 0; c < 3; c++) {
-            bits.push(pixels[i + c] & 1);
+        const bits = [];
+        for (let i = 0; i < pixels.length; i += 4) {
+            for (let c = 0; c < 3; c++) {
+                bits.push(pixels[i + c] & 1);
+            }
         }
-    }
-    const bytes = bytesFromBits(bits);
+        const bytes = bytesFromBits(bits);
 
-    const magic = enc.encode("LSBSTEGO1");
-    let ok = true;
-    if (bytes.length < magic.length) ok = false;
-    else {
-        for (let i = 0; i < magic.length; i++) {
-            if (bytes[i] !== magic[i]) { ok = false; break; }
+        const magic = enc.encode(MARKERS.LSB_STEGO);
+        let ok = true;
+        if (bytes.length < magic.length) ok = false;
+        else {
+            for (let i = 0; i < magic.length; i++) {
+                if (bytes[i] !== magic[i]) { ok = false; break; }
+            }
         }
-    }
-    if (!ok) throw new Error("No LSB stego payload found");
+        if (!ok) throw new Error("No LSB stego payload found");
 
-    const headerBytes = bytes.slice(magic.length);
-    const headerBuf = headerBytes.buffer;
-    const { salt, iv, ciphertext, modeId } = parseHeader(headerBuf);
-    if (modeId !== MODE_FULL_AES_GCM) throw new Error("Unexpected mode in PNG LSB stego");
-    const plainBuf = await decryptFullAESGCM(ciphertext, password, salt, iv);
-    return new Blob([plainBuf], { type: "application/octet-stream" });
+        const headerBytes = bytes.slice(magic.length);
+        const headerBuf = headerBytes.buffer;
+        const { salt, iv, ciphertext, modeId } = parseHeader(headerBuf);
+        if (modeId !== MODE_FULL_AES_GCM) throw new Error("Unexpected mode in PNG LSB stego");
+        const plainBuf = await decryptFullAESGCM(ciphertext, password, salt, iv);
+        return new Blob([plainBuf], { type: MIME_TYPES.BINARY });
+    } catch (err) {
+        throw new Error("LSB stego decoding failed: " + err.message);
+    }
 }
 
 /* ===================== Dispatcher ===================== */
@@ -674,35 +850,35 @@ async function encryptDispatcher(algo, file, data, password) {
     switch (algo) {
         case "full-aes-gcm": {
             const buf = await encryptFullAESGCM(data, password);
-            return { blob: new Blob([buf]), filename: name + ".enc" };
+            return { blob: new Blob([buf]), filename: name + "." + FILE_EXTENSIONS.ENC };
         }
         case "full-aes-cbc": {
             const buf = await encryptFullAESCBC(data, password);
-            return { blob: new Blob([buf]), filename: name + ".enc" };
+            return { blob: new Blob([buf]), filename: name + "." + FILE_EXTENSIONS.ENC };
         }
         case "full-aes-ctr": {
             const buf = await encryptFullAESCTR(data, password);
-            return { blob: new Blob([buf]), filename: name + ".enc" };
+            return { blob: new Blob([buf]), filename: name + "." + FILE_EXTENSIONS.ENC };
         }
         case "full-xor": {
             const buf = await encryptFullXOR(data, password);
-            return { blob: new Blob([buf]), filename: name + ".enc" };
+            return { blob: new Blob([buf]), filename: name + "." + FILE_EXTENSIONS.ENC };
         }
         case "selective-text": {
             const blob = await encryptSelectiveText(name, data, password);
-            return { blob, filename: name.replace(/(\.[^.]*)?$/, "_selenc$1") };
+            return { blob, filename: transformFilename(name, "_selenc$1") };
         }
         case "embedded-block": {
             const blob = await encryptEmbeddedBlock(name, data, password);
-            return { blob, filename: name.replace(/(\.[^.]*)?$/, "_emb$1") };
+            return { blob, filename: transformFilename(name, "_emb$1") };
         }
         case "stego-png-meta": {
             const blob = await encryptStegoPngMeta(name, data, password);
-            return { blob, filename: name.replace(/(\.[^.]*)?$/, "_meta.png") };
+            return { blob, filename: transformFilename(name, "_meta.png") };
         }
         case "stego-png-lsb": {
             const blob = await encryptStegoPngLSB(name, data, password);
-            return { blob, filename: name.replace(/(\.[^.]*)?$/, "_lsb.png") };
+            return { blob, filename: transformFilename(name, "_lsb.png") };
         }
         default:
             throw new Error("Unknown encryption mode");
@@ -729,7 +905,7 @@ async function decryptDispatcher(algo, file, data, password) {
             } else {
                 throw new Error("Unsupported mode in header");
             }
-            const outName = name.replace(/\.enc$/, "") || ("decrypted_" + name);
+            const outName = name.replace(new RegExp("\\." + FILE_EXTENSIONS.ENC + "$"), "") || ("decrypted_" + name);
             return { blob: new Blob([plain]), filename: outName };
         }
         case "selective-text": {
