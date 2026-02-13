@@ -1,0 +1,1 @@
+this can encrypt lots of coding lang like HTML, CSV, PNG, JPG and lots more this part is important so read this: the password to encrypt stuff and decrypt stuff is PBKDF2 and make sure you download all of the files and put them in the same folder to use the encryptor open the html file with all of the files in the same folder 
